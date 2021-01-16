@@ -15,10 +15,11 @@ import Control.Monad (unless)
 import qualified Control.Exception as E
 import Data.Foldable (for_)
 import Data.Function
+import Data.Int
 import Data.List (partition)
 import qualified Data.List.NonEmpty as NE
-import Data.Time.Clock
 import qualified Data.Vector as V
+import System.Clock
 
 import Data.Pool.Internal.Pool
 
@@ -45,8 +46,8 @@ reaper destroy idleTime inLock pools = fix $ \next -> do
     fix $ \again -> do
       minTimes
        <- V.forM pools $ \LocalPool{..} -> do
-            now <- getCurrentTime
-            let isStale Entry{..} = now `diffUTCTime` lastUse > fromIntegral idleTime
+            now <- getTime Monotonic
+            let isStale Entry{..} = toMicroseconds (now `diffTimeSpec` lastUse) > fromIntegral idleTime
             (resources, minTime) <- atomically $ do
               (stale, fresh) <- partition isStale <$> readTVar entries
               let minTime = fmap minimum $ NE.nonEmpty $ map lastUse fresh
@@ -61,11 +62,16 @@ reaper destroy idleTime inLock pools = fix $ \next -> do
         xs | V.null xs -> next
            | otherwise -> do
          let minTime = minimum xs
-         now1 <- getCurrentTime
-         let nextDelay = max 0 $ round $ 1000000*realToFrac @_ @Double (minTime `diffUTCTime` now1)
+         now1 <- getTime Monotonic
+         let nextDelay = max 0 $ toMicroseconds (minTime `diffTimeSpec` now1)
          if nextDelay <= 0
-           then loop nextDelay
+           then if nextDelay > fromIntegral (maxBound :: Int)
+                then loop maxBound
+                else loop (fromIntegral nextDelay)
            else again
 
 modifyTVar_ :: TVar a -> (a -> a) -> STM ()
 modifyTVar_ v f = readTVar v >>= \a -> writeTVar v $! f a
+
+toMicroseconds :: TimeSpec -> Int64
+toMicroseconds (TimeSpec secs nsecs) = secs*1000000 + nsecs `div` 1000

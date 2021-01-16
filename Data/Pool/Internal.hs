@@ -49,7 +49,6 @@ import Control.Exception (SomeException, onException, mask_)
 import Control.Monad (forM_, join, liftM3, when)
 import Data.Hashable (hash)
 import Data.IORef (IORef, newIORef, mkWeakIORef)
-import Data.Time.Clock (NominalDiffTime, getCurrentTime)
 import Data.Typeable (Typeable)
 import GHC.Conc.Sync (labelThread)
 import qualified Control.Exception as E
@@ -66,6 +65,7 @@ import Control.Monad.IO.Class (liftIO)
 #endif
 import Data.Pool.Internal.Pool
 import Data.Pool.Internal.Reaper
+import System.Clock
 
 #if MIN_VERSION_base(4,3,0)
 import Control.Exception (mask)
@@ -84,7 +84,7 @@ data Pool a = Pool {
     , numStripes :: Int
     -- ^ The number of stripes (distinct sub-pools) to maintain.
     -- The smallest acceptable value is 1.
-    , idleTime :: NominalDiffTime
+    , idleTime :: Double
     -- ^ Amount of time for which an unused resource is kept alive.
     -- The smallest acceptable value is 0.5 seconds.
     --
@@ -124,7 +124,7 @@ createPool
     -> Int
     -- ^ The number of stripes (distinct sub-pools) to maintain.
     -- The smallest acceptable value is 1.
-    -> NominalDiffTime
+    -> Double
     -- ^ Amount of time for which an unused resource is kept open.
     -- The smallest acceptable value is 0.5 seconds.
     --
@@ -338,7 +338,7 @@ destroyResource Pool{..} LocalPool{..} resource = do
 -- | Return a resource to the given 'LocalPool'.
 putResource :: LocalPool a -> a -> IO ()
 putResource LocalPool{..} resource = do
-    now <- getCurrentTime
+    now <- getTime Monotonic
     atomically $ modifyTVar_ entries (Entry resource now:)
 #if __GLASGOW_HASKELL__ >= 700
 {-# INLINABLE putResource #-}

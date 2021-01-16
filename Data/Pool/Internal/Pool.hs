@@ -4,14 +4,14 @@ module Data.Pool.Internal.Pool
   ) where
 
 import Control.Concurrent.STM
-import Data.Time.Clock
 import Data.IORef
 import Data.Typeable
+import System.Clock
 
 -- | A single resource pool entry.
 data Entry a = Entry {
       entry :: a
-    , lastUse :: UTCTime
+    , lastUse :: TimeSpec
     -- ^ Time of last return.
     }
 
