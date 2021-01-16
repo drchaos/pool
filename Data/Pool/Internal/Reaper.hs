@@ -13,7 +13,6 @@ import Control.Concurrent.STM
 import Control.Exception (SomeException)
 import Control.Monad (unless)
 import qualified Control.Exception as E
-import Data.Foldable (for_)
 import Data.Function
 import Data.Int
 import Data.List (partition)
@@ -55,8 +54,9 @@ reaper destroy idleTime inLock pools = fix $ \next -> do
                 writeTVar entries fresh
                 modifyTVar_ inUse (subtract (length stale))
               pure (stale, minTime)
-            for_ resources $ \resource -> do
-               destroy (entry resource) `E.catch` \(_::SomeException) -> return () -- XXX: unsafe(!)
+            E.mask_ $ foldr E.finally (pure ()) $
+              map (\x -> destroy (entry x) `E.catch` \(_ :: SomeException) -> return ())
+                  resources
             pure minTime
       case V.mapMaybe id minTimes of
         xs | V.null xs -> next

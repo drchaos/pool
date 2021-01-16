@@ -46,7 +46,7 @@ module Data.Pool.Internal
 import Control.Concurrent (ThreadId, forkIOWithUnmask, killThread, myThreadId)
 import Control.Concurrent.STM
 import Control.Exception (SomeException, onException, mask_)
-import Control.Monad (forM_, join, liftM3, when)
+import Control.Monad (join, liftM3, when)
 import Data.Hashable (hash)
 import Data.IORef (IORef, newIORef, mkWeakIORef)
 import Data.Typeable (Typeable)
@@ -200,8 +200,10 @@ purgeLocalPool destroy LocalPool{..} = do
     idle <- swapTVar entries []
     modifyTVar_ inUse (subtract (length idle))
     return (map entry idle)
-  forM_ resources $ \resource ->
-    destroy resource `E.catch` \(_::SomeException) -> return ()
+  mask_ $
+    foldr E.finally (pure ()) 
+      (map (\resource -> destroy resource `E.catch` \(_::SomeException) -> return ())
+           resources)
 
 -- | Temporarily take a resource from a 'Pool', perform an action with
 -- it, and return it to the pool afterwards.
