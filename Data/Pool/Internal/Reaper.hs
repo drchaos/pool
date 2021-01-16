@@ -63,12 +63,9 @@ reaper destroy idleTime inLock pools = fix $ \next -> do
            | otherwise -> do
          let minTime = minimum xs
          now1 <- getTime Monotonic
-         let nextDelay = max 0 $ toMicroseconds (minTime `diffTimeSpec` now1)
-         if nextDelay <= 0
-           then if nextDelay > fromIntegral (maxBound :: Int)
-                then loop maxBound
-                else loop (fromIntegral nextDelay)
-           else again
+         if minTime < now1
+           then again
+           else loop (fromIntegral $ toMicroseconds (minTime `diffTimeSpec` now1))
 
 modifyTVar_ :: TVar a -> (a -> a) -> STM ()
 modifyTVar_ v f = readTVar v >>= \a -> writeTVar v $! f a

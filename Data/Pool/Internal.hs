@@ -150,7 +150,7 @@ createPool create destroy numStripes idleTime maxResources = do
                 liftM3 LocalPool (newTVarIO 0) (newTVarIO []) (newIORef ())
   lock <- newEmptyTMVarIO
   reaperId <- forkIOLabeledWithUnmask "resource-pool: reaper" $ \unmask ->
-                unmask $ reaper destroy (round $ realToFrac @_ @Double idleTime) lock localPools
+                unmask $ reaper destroy (round $ 1000000 * idleTime) lock localPools
   fin <- newIORef ()
   let signal = tryPutTMVar lock () >> pure ()
   let p = Pool {
