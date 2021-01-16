@@ -36,7 +36,6 @@ library
   build-depends:
     base >= 4.4 && < 5,
     hashable,
-    monad-control >= 0.2.0.1,
     transformers,
     transformers-base >= 0.4,
     stm >= 2.3,

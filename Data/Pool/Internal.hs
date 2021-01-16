@@ -1,12 +1,5 @@
-{-# LANGUAGE CPP, NamedFieldPuns, RecordWildCards, ScopedTypeVariables, RankNTypes, DeriveDataTypeable, TypeApplications #-}
-
-#if MIN_VERSION_monad_control(0,3,0)
-{-# LANGUAGE FlexibleContexts #-}
-#endif
-
-#if !MIN_VERSION_base(4,3,0)
+{-# LANGUAGE NamedFieldPuns, RecordWildCards, ScopedTypeVariables, RankNTypes, DeriveDataTypeable, TypeApplications #-}
 {-# LANGUAGE RankNTypes #-}
-#endif
 
 -- |
 -- Module:      Data.Pool
@@ -54,26 +47,11 @@ import GHC.Conc.Sync (labelThread)
 import qualified Control.Exception as E
 import qualified Data.Vector as V
 
-#if MIN_VERSION_monad_control(0,3,0)
-import Control.Monad.Trans.Control (MonadBaseControl, control)
-import Control.Monad.Base (liftBase)
-#else
-import Control.Monad.IO.Control (MonadControlIO, controlIO)
-import Control.Monad.IO.Class (liftIO)
-#define control controlIO
-#define liftBase liftIO
-#endif
 import Data.Pool.Internal.Pool
 import Data.Pool.Internal.Reaper
 import System.Clock
 
-#if MIN_VERSION_base(4,3,0)
 import Control.Exception (mask)
-#else
--- Don't do any async exception protection for older GHCs.
-mask :: ((forall a. IO a -> IO a) -> IO b) -> IO b
-mask f = f id
-#endif
 
 
 data Pool a = Pool {
@@ -224,23 +202,14 @@ purgeLocalPool destroy LocalPool{..} = do
 -- destroy a pooled resource, as doing so will almost certainly cause
 -- a subsequent user (who expects the resource to be valid) to throw
 -- an exception.
-withResource ::
-#if MIN_VERSION_monad_control(0,3,0)
-    (MonadBaseControl IO m)
-#else
-    (MonadControlIO m)
-#endif
-  => Pool a -> (a -> m b) -> m b
-{-# SPECIALIZE withResource :: Pool a -> (a -> IO b) -> IO b #-}
-withResource pool act = control $ \runInIO -> mask $ \restore -> do
+withResource :: Pool a -> (a -> IO b) -> IO b
+withResource pool act = mask $ \restore -> do
   (resource, local) <- takeResource pool
-  ret <- restore (runInIO (act resource)) `onException`
+  ret <- restore (act resource) `onException`
             destroyResource pool local resource
   putResource local resource
   return ret
-#if __GLASGOW_HASKELL__ >= 700
 {-# INLINABLE withResource #-}
-#endif
 
 -- | Take a resource from the pool, following the same results as
 -- 'withResource'. Note that this function should be used with caution, as
@@ -252,7 +221,7 @@ withResource pool act = control $ \runInIO -> mask $ \restore -> do
 takeResource :: Pool a -> IO (a, LocalPool a)
 takeResource pool@Pool{..} = do
   local@LocalPool{..} <- getLocalPool pool
-  resource <- liftBase . join . atomically $ do
+  resource <- join . atomically $ do
     ents <- readTVar entries
     case ents of
       (Entry{..}:es) -> writeTVar entries es >> return (return entry)
@@ -264,34 +233,24 @@ takeResource pool@Pool{..} = do
         return $
           create `onException` atomically (modifyTVar_ inUse (subtract 1))
   return (resource, local)
-#if __GLASGOW_HASKELL__ >= 700
 {-# INLINABLE takeResource #-}
-#endif
 
 -- | Similar to 'withResource', but only performs the action if a resource could
 -- be taken from the pool /without blocking/. Otherwise, 'tryWithResource'
 -- returns immediately with 'Nothing' (ie. the action function is /not/ called).
 -- Conversely, if a resource can be borrowed from the pool without blocking, the
 -- action is performed and it's result is returned, wrapped in a 'Just'.
-tryWithResource :: forall m a b.
-#if MIN_VERSION_monad_control(0,3,0)
-    (MonadBaseControl IO m)
-#else
-    (MonadControlIO m)
-#endif
-  => Pool a -> (a -> m b) -> m (Maybe b)
-tryWithResource pool act = control $ \runInIO -> mask $ \restore -> do
+tryWithResource :: Pool a -> (a -> IO b) -> IO (Maybe b)
+tryWithResource pool act = mask $ \restore -> do
   res <- tryTakeResource pool
   case res of
     Just (resource, local) -> do
-      ret <- restore (runInIO (Just <$> act resource)) `onException`
+      ret <- restore (Just <$> act resource) `onException`
                 destroyResource pool local resource
       putResource local resource
       return ret
-    Nothing -> restore . runInIO $ return (Nothing :: Maybe b)
-#if __GLASGOW_HASKELL__ >= 700
+    Nothing -> restore $ return (Nothing :: Maybe b)
 {-# INLINABLE tryWithResource #-}
-#endif
 
 -- | A non-blocking version of 'takeResource'. The 'tryTakeResource' function
 -- returns immediately, with 'Nothing' if the pool is exhausted, or @'Just' (a,
@@ -299,7 +258,7 @@ tryWithResource pool act = control $ \runInIO -> mask $ \restore -> do
 tryTakeResource :: Pool a -> IO (Maybe (a, LocalPool a))
 tryTakeResource pool@Pool{..} = do
   local@LocalPool{..} <- getLocalPool pool
-  resource <- liftBase . join . atomically $ do
+  resource <- join . atomically $ do
     ents <- readTVar entries
     case ents of
       (Entry{..}:es) -> writeTVar entries es >> return (return . Just $ entry)
@@ -312,39 +271,31 @@ tryTakeResource pool@Pool{..} = do
             return $ Just <$>
               create `onException` atomically (modifyTVar_ inUse (subtract 1))
   return $ (flip (,) local) <$> resource
-#if __GLASGOW_HASKELL__ >= 700
 {-# INLINABLE tryTakeResource #-}
-#endif
 
 -- | Get a (Thread-)'LocalPool'
 --
 -- Internal, just to not repeat code for 'takeResource' and 'tryTakeResource'
 getLocalPool :: Pool a -> IO (LocalPool a)
 getLocalPool Pool{..} = do
-  i <- liftBase $ ((`mod` numStripes) . hash) <$> myThreadId
+  i <- ((`mod` numStripes) . hash) <$> myThreadId
   return $ localPools V.! i
-#if __GLASGOW_HASKELL__ >= 700
 {-# INLINABLE getLocalPool #-}
-#endif
 
 -- | Destroy a resource. Note that this will ignore any exceptions in the
 -- destroy function.
 destroyResource :: Pool a -> LocalPool a -> a -> IO ()
 destroyResource Pool{..} LocalPool{..} resource = do
-   destroy resource `E.catch` \(_::SomeException) -> return ()
-   atomically (modifyTVar_ inUse (subtract 1))
-#if __GLASGOW_HASKELL__ >= 700
+   mask_ $ (destroy resource `E.catch` \(_::SomeException) -> return ())
+     `E.finally` atomically (modifyTVar_ inUse (subtract 1))
 {-# INLINABLE destroyResource #-}
-#endif
 
 -- | Return a resource to the given 'LocalPool'.
 putResource :: LocalPool a -> a -> IO ()
 putResource LocalPool{..} resource = do
     now <- getTime Monotonic
     atomically $ modifyTVar_ entries (Entry resource now:)
-#if __GLASGOW_HASKELL__ >= 700
 {-# INLINABLE putResource #-}
-#endif
 
 -- | Destroy all resources in all stripes in the pool. Note that this
 -- will ignore any exceptions in the destroy function.
@@ -361,7 +312,8 @@ putResource LocalPool{..} resource = do
 -- instead of waiting on the garbage collector to destroy them, thus
 -- freeing up those resources sooner.
 destroyAllResources :: Pool a -> IO ()
-destroyAllResources Pool{..} = V.forM_ localPools $ purgeLocalPool destroy
+destroyAllResources Pool{..} = 
+  foldr E.finally (pure ()) (V.map (purgeLocalPool destroy) localPools)
 
 modifyTVar_ :: TVar a -> (a -> a) -> STM ()
 modifyTVar_ v f = readTVar v >>= \a -> writeTVar v $! f a
