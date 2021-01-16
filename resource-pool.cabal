@@ -29,6 +29,7 @@ flag developer
 library
   exposed-modules:
     Data.Pool
+    Data.Pool.Internal
 
   build-depends:
     base >= 4.4 && < 5,
