@@ -17,6 +17,7 @@ category:            Data, Database, Network
 build-type:          Simple
 extra-source-files:
   README.markdown
+Tested-with: GHC==8.10.3 GHC==8.6.5 GHC==8.8.4 GHC==8.4.4
 
 cabal-version:       >=1.8
 
