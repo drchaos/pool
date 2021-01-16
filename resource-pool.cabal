@@ -30,6 +30,8 @@ library
   exposed-modules:
     Data.Pool
     Data.Pool.Internal
+    Data.Pool.Internal.Reaper
+    Data.Pool.Internal.Pool
 
   build-depends:
     base >= 4.4 && < 5,

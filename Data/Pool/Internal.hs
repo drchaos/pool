@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP, NamedFieldPuns, RecordWildCards, ScopedTypeVariables, RankNTypes, DeriveDataTypeable #-}
+{-# LANGUAGE CPP, NamedFieldPuns, RecordWildCards, ScopedTypeVariables, RankNTypes, DeriveDataTypeable, TypeApplications #-}
 
 #if MIN_VERSION_monad_control(0,3,0)
 {-# LANGUAGE FlexibleContexts #-}
@@ -43,15 +43,13 @@ module Data.Pool.Internal
     , purgeLocalPool
     ) where
 
-import Control.Applicative ((<$>))
-import Control.Concurrent (ThreadId, forkIOWithUnmask, killThread, myThreadId, threadDelay)
+import Control.Concurrent (ThreadId, forkIOWithUnmask, killThread, myThreadId)
 import Control.Concurrent.STM
 import Control.Exception (SomeException, onException, mask_)
-import Control.Monad (forM_, forever, join, liftM3, unless, when)
+import Control.Monad (forM_, join, liftM3, when)
 import Data.Hashable (hash)
 import Data.IORef (IORef, newIORef, mkWeakIORef)
-import Data.List (partition)
-import Data.Time.Clock (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime)
+import Data.Time.Clock (NominalDiffTime, getCurrentTime)
 import Data.Typeable (Typeable)
 import GHC.Conc.Sync (labelThread)
 import qualified Control.Exception as E
@@ -66,6 +64,8 @@ import Control.Monad.IO.Class (liftIO)
 #define control controlIO
 #define liftBase liftIO
 #endif
+import Data.Pool.Internal.Pool
+import Data.Pool.Internal.Reaper
 
 #if MIN_VERSION_base(4,3,0)
 import Control.Exception (mask)
@@ -75,22 +75,6 @@ mask :: ((forall a. IO a -> IO a) -> IO b) -> IO b
 mask f = f id
 #endif
 
--- | A single resource pool entry.
-data Entry a = Entry {
-      entry :: a
-    , lastUse :: UTCTime
-    -- ^ Time of last return.
-    }
-
--- | A single striped pool.
-data LocalPool a = LocalPool {
-      inUse :: TVar Int
-    -- ^ Count of open entries (both idle and in use).
-    , entries :: TVar [Entry a]
-    -- ^ Idle entries.
-    , lfin :: IORef ()
-    -- ^ empty value used to attach a finalizer to (internal)
-    } deriving (Typeable)
 
 data Pool a = Pool {
       create :: IO a
@@ -117,6 +101,8 @@ data Pool a = Pool {
     -- ^ Per-capability resource pools.
     , fin :: IORef ()
     -- ^ empty value used to attach a finalizer to (internal)
+    , signal :: STM ()
+    -- ^ signal that a new resource was allocated
     } deriving (Typeable)
 
 instance Show (Pool a) where
@@ -162,9 +148,11 @@ createPool create destroy numStripes idleTime maxResources = do
     modError "pool " $ "invalid maximum resource count " ++ show maxResources
   localPools <- V.replicateM numStripes $
                 liftM3 LocalPool (newTVarIO 0) (newTVarIO []) (newIORef ())
+  lock <- newEmptyTMVarIO
   reaperId <- forkIOLabeledWithUnmask "resource-pool: reaper" $ \unmask ->
-                unmask $ reaper destroy idleTime localPools
+                unmask $ reaper destroy (round $ realToFrac @_ @Double idleTime) lock localPools
   fin <- newIORef ()
+  let signal = tryPutTMVar lock () >> pure ()
   let p = Pool {
             create
           , destroy
@@ -173,6 +161,7 @@ createPool create destroy numStripes idleTime maxResources = do
           , maxResources
           , localPools
           , fin
+          , signal
           }
   mkWeakIORef fin (killThread reaperId) >>
     V.mapM_ (\lp -> mkWeakIORef (lfin lp) (purgeLocalPool destroy lp)) localPools
@@ -202,22 +191,6 @@ forkIOLabeledWithUnmask label m = mask_ $ forkIOWithUnmask $ \unmask -> do
                                     labelThread tid label
                                     m unmask
 
--- | Periodically go through all pools, closing any resources that
--- have been left idle for too long.
-reaper :: (a -> IO ()) -> NominalDiffTime -> V.Vector (LocalPool a) -> IO ()
-reaper destroy idleTime pools = forever $ do
-  threadDelay (1 * 1000000)
-  now <- getCurrentTime
-  let isStale Entry{..} = now `diffUTCTime` lastUse > idleTime
-  V.forM_ pools $ \LocalPool{..} -> do
-    resources <- atomically $ do
-      (stale,fresh) <- partition isStale <$> readTVar entries
-      unless (null stale) $ do
-        writeTVar entries fresh
-        modifyTVar_ inUse (subtract (length stale))
-      return (map entry stale)
-    forM_ resources $ \resource -> do
-      destroy resource `E.catch` \(_::SomeException) -> return ()
 
 -- | Destroy all idle resources of the given 'LocalPool' and remove them from
 -- the pool.
@@ -285,6 +258,7 @@ takeResource pool@Pool{..} = do
         used <- readTVar inUse
         when (used == maxResources) retry
         writeTVar inUse $! used + 1
+        signal
         return $
           create `onException` atomically (modifyTVar_ inUse (subtract 1))
   return (resource, local)
