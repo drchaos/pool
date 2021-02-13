@@ -40,7 +40,7 @@ import Control.Concurrent (killThread, myThreadId)
 import Control.Concurrent.STM
 import Control.Exception (SomeException, onException, mask, mask_)
 import qualified Control.Exception as E
-import Control.Monad (join, liftM3, when)
+import Control.Monad (liftM3, when, void, replicateM)
 import Data.Hashable (hash)
 import Data.IORef (IORef, newIORef, mkWeakIORef)
 import Data.Typeable (Typeable)
@@ -108,6 +108,12 @@ createPool
     -- longer than requested, as the reaper thread wakes at 1-second
     -- intervals.
     -> Int
+    -- ^ Minimum number of resources to keep open per stripe. The smallest
+    -- acceptable value is 0.
+    --
+    -- If resources will be closed on timeout they will be automatically
+    -- reallocated if total number of values will be below this value.
+    -> Int
     -- ^ Maximum number of resources to keep open per stripe.  The
     -- smallest acceptable value is 1.
     --
@@ -115,7 +121,7 @@ createPool
     -- single stripe, even if other stripes have idle resources
     -- available.
      -> IO (Pool a)
-createPool create destroy numStripes idleTime maxResources = do
+createPool create destroy numStripes idleTime minResources maxResources = do
   when (numStripes < 1) $
     modError "pool " $ "invalid stripe count " ++ show numStripes
   when (idleTime < 0.5) $
@@ -126,7 +132,12 @@ createPool create destroy numStripes idleTime maxResources = do
                 liftM3 LocalPool (newTVarIO 0) (newTVarIO []) (newIORef ())
   lock <- newEmptyTMVarIO
   reaperId <- forkIOLabeledWithUnmask "resource-pool: reaper" $ \unmask ->
-                unmask $ reaper destroy (round $ 1000000 * idleTime) lock localPools
+                unmask $ reaper destroy
+                  (void . tryAllocateInLocalPool maxResources create)
+                  (minResources)
+                  (round $ 1000000 * idleTime)
+                  lock
+                  localPools
   fin <- newIORef ()
   let signal = tryPutTMVar lock () >> pure ()
   let p = Pool {
@@ -141,6 +152,8 @@ createPool create destroy numStripes idleTime maxResources = do
           }
   mkWeakIORef fin (killThread reaperId) >>
     V.mapM_ (\lp -> mkWeakIORef (lfin lp) (purgeLocalPool destroy lp)) localPools
+  V.forM_ localPools $ \lp -> do
+     replicateM minResources $ void $ tryAllocateInLocalPool maxResources create lp
   return p
 
 -- | Destroy all idle resources of the given 'LocalPool' and remove them from
@@ -193,17 +206,8 @@ withResource pool act = mask $ \restore -> do
 -- pool (via 'putResource').
 takeResource :: Pool a -> IO (a, LocalPool a)
 takeResource pool@Pool{..} = do
-  local@LocalPool{..} <- getLocalPool pool
-  resource <- join . atomically $ do
-    ents <- readTVar entries
-    case ents of
-      (Entry{..}:es) -> writeTVar entries es >> return (return entry)
-      [] -> do
-        used <- readTVar inUse
-        when (used == maxResources) retry
-        writeTVar inUse $! used + 1
-        return $
-          create `onException` atomically (modifyTVar' inUse (subtract 1))
+  local <- getLocalPool pool
+  resource <- allocateInLocalPool maxResources create local
   return (resource, local)
 {-# INLINABLE takeResource #-}
 
@@ -229,19 +233,8 @@ tryWithResource pool act = mask $ \restore -> do
 -- 'LocalPool' a)@ if a resource could be borrowed from the pool successfully.
 tryTakeResource :: Pool a -> IO (Maybe (a, LocalPool a))
 tryTakeResource pool@Pool{..} = do
-  local@LocalPool{..} <- getLocalPool pool
-  resource <- join . atomically $ do
-    ents <- readTVar entries
-    case ents of
-      (Entry{..}:es) -> writeTVar entries es >> return (return . Just $ entry)
-      [] -> do
-        used <- readTVar inUse
-        if used == maxResources
-          then return (return Nothing)
-          else do
-            writeTVar inUse $! used + 1
-            return $ Just <$>
-              create `onException` atomically (modifyTVar' inUse (subtract 1))
+  local <- getLocalPool pool
+  resource <- tryAllocateInLocalPool maxResources create local
   return $ (flip (,) local) <$> resource
 {-# INLINABLE tryTakeResource #-}
 

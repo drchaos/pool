@@ -1,6 +1,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE BangPatterns #-}
 -- | Implements resource reaper.
 -- This is a library specific resource reaper. It cleans
 -- resources that should be removed as they were not used
@@ -11,7 +12,7 @@ module Data.Pool.Internal.Reaper
 
 import Control.Concurrent.STM
 import Control.Exception (SomeException)
-import Control.Monad (unless)
+import Control.Monad (unless, replicateM_)
 import qualified Control.Exception as E
 import Data.Function
 import Data.Int
@@ -33,30 +34,37 @@ import Data.Pool.Internal.Pool
 --      without running any work.
 --   
 reaper :: (a -> IO ()) -- ^ Destroy action.
+       -> (LocalPool a -> IO ()) -- ^ Create resource
+       -> Int -- ^ Minimal amout of resources in the LocalPool
        -> Int -- ^ Resource life-time in microseconds.
        -> TMVar () -- ^ Internal lock that should be set whenever a new resource is allocated.
        -> V.Vector (LocalPool a) -- ^ Local pools
        -> IO ()
-reaper destroy idleTime inLock pools = fix $ \next -> do
+reaper destroy restore minResources idleTime inLock pools = fix $ \next -> do
   atomically $ takeTMVar inLock
   flip fix idleTime $ \loop c -> do
     delay <- registerDelay c
     atomically $ readTVar delay >>= check
     fix $ \again -> do
       minTimes
-       <- V.forM pools $ \LocalPool{..} -> do
+       <- V.forM pools $ \lp@LocalPool{..} -> do
             now <- getTime Monotonic
             let isStale Entry{..} = toMicroseconds (now `diffTimeSpec` lastUse) > fromIntegral idleTime
-            (resources, minTime) <- atomically $ do
+            (resources, minTime, toRestore) <- atomically $ do
               (stale, fresh) <- partition isStale <$> readTVar entries
               let minTime = fmap minimum $ NE.nonEmpty $ map lastUse fresh
-              unless (null stale) $ do
-                writeTVar entries fresh
-                modifyTVar' inUse (subtract (length stale))
-              pure (stale, minTime)
-            E.mask_ $ foldr E.finally (pure ()) $
-              map (\x -> destroy (entry x) `E.catch` \(_ :: SomeException) -> return ())
-                  resources
+              if null stale
+                then pure (stale, minTime, 0)
+                else do
+                  writeTVar entries fresh
+                  old <- readTVar inUse
+                  let !new = old - (length stale)
+                  writeTVar inUse new
+                  pure (stale, minTime, max 0 (new - minResources))
+            unless (null resources) $ do
+              E.mask_ $ foldr E.finally (replicateM_ toRestore $ restore lp) $
+                map (\x -> destroy (entry x) `E.catch` \(_ :: SomeException) -> return ())
+                    resources
             pure minTime
       case V.mapMaybe id minTimes of
         xs | V.null xs -> next
