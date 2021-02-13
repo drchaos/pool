@@ -21,6 +21,7 @@ import qualified Data.Vector as V
 import System.Clock
 
 import Data.Pool.Internal.Pool
+import Data.Pool.Internal.Missing
 
 -- | Runs a thread that kills unused resources. This method has the following
 -- properties:
@@ -66,9 +67,6 @@ reaper destroy idleTime inLock pools = fix $ \next -> do
          if minTime < now1
            then again
            else loop (fromIntegral $ toMicroseconds (minTime `diffTimeSpec` now1))
-
-modifyTVar_ :: TVar a -> (a -> a) -> STM ()
-modifyTVar_ v f = readTVar v >>= \a -> writeTVar v $! f a
 
 toMicroseconds :: TimeSpec -> Int64
 toMicroseconds (TimeSpec secs nsecs) = secs*1000000 + nsecs `div` 1000

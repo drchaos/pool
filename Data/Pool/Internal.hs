@@ -36,22 +36,20 @@ module Data.Pool.Internal
     , purgeLocalPool
     ) where
 
-import Control.Concurrent (ThreadId, forkIOWithUnmask, killThread, myThreadId)
+import Control.Concurrent (killThread, myThreadId)
 import Control.Concurrent.STM
-import Control.Exception (SomeException, onException, mask_)
+import Control.Exception (SomeException, onException, mask, mask_)
+import qualified Control.Exception as E
 import Control.Monad (join, liftM3, when)
 import Data.Hashable (hash)
 import Data.IORef (IORef, newIORef, mkWeakIORef)
 import Data.Typeable (Typeable)
-import GHC.Conc.Sync (labelThread)
-import qualified Control.Exception as E
 import qualified Data.Vector as V
+import System.Clock
 
 import Data.Pool.Internal.Pool
 import Data.Pool.Internal.Reaper
-import System.Clock
-
-import Control.Exception (mask)
+import Data.Pool.Internal.Missing
 
 
 data Pool a = Pool {
@@ -145,31 +143,6 @@ createPool create destroy numStripes idleTime maxResources = do
     V.mapM_ (\lp -> mkWeakIORef (lfin lp) (purgeLocalPool destroy lp)) localPools
   return p
 
--- TODO: Propose 'forkIOLabeledWithUnmask' for the base library.
-
--- | Sparks off a new thread using 'forkIOWithUnmask' to run the given
--- IO computation, but first labels the thread with the given label
--- (using 'labelThread').
---
--- The implementation makes sure that asynchronous exceptions are
--- masked until the given computation is executed. This ensures the
--- thread will always be labeled which guarantees you can always
--- easily find it in the GHC event log.
---
--- Like 'forkIOWithUnmask', the given computation is given a function
--- to unmask asynchronous exceptions. See the documentation of that
--- function for the motivation of this.
---
--- Returns the 'ThreadId' of the newly created thread.
-forkIOLabeledWithUnmask :: String
-                        -> ((forall a. IO a -> IO a) -> IO ())
-                        -> IO ThreadId
-forkIOLabeledWithUnmask label m = mask_ $ forkIOWithUnmask $ \unmask -> do
-                                    tid <- myThreadId
-                                    labelThread tid label
-                                    m unmask
-
-
 -- | Destroy all idle resources of the given 'LocalPool' and remove them from
 -- the pool.
 purgeLocalPool :: (a -> IO ()) -> LocalPool a -> IO ()
@@ -207,7 +180,7 @@ withResource pool act = mask $ \restore -> do
   (resource, local) <- takeResource pool
   ret <- restore (act resource) `onException`
             destroyResource pool local resource
-  putResource local resource
+  putResource pool local resource
   return ret
 {-# INLINABLE withResource #-}
 
@@ -229,7 +202,6 @@ takeResource pool@Pool{..} = do
         used <- readTVar inUse
         when (used == maxResources) retry
         writeTVar inUse $! used + 1
-        signal
         return $
           create `onException` atomically (modifyTVar_ inUse (subtract 1))
   return (resource, local)
@@ -247,7 +219,7 @@ tryWithResource pool act = mask $ \restore -> do
     Just (resource, local) -> do
       ret <- restore (Just <$> act resource) `onException`
                 destroyResource pool local resource
-      putResource local resource
+      putResource pool local resource
       return ret
     Nothing -> restore $ return (Nothing :: Maybe b)
 {-# INLINABLE tryWithResource #-}
@@ -291,10 +263,12 @@ destroyResource Pool{..} LocalPool{..} resource = do
 {-# INLINABLE destroyResource #-}
 
 -- | Return a resource to the given 'LocalPool'.
-putResource :: LocalPool a -> a -> IO ()
-putResource LocalPool{..} resource = do
+putResource :: Pool a -> LocalPool a -> a -> IO ()
+putResource Pool{..} LocalPool{..} resource = do
     now <- getTime Monotonic
-    atomically $ modifyTVar_ entries (Entry resource now:)
+    atomically $ do
+      modifyTVar_ entries (Entry resource now:)
+      signal 
 {-# INLINABLE putResource #-}
 
 -- | Destroy all resources in all stripes in the pool. Note that this
@@ -315,9 +289,6 @@ destroyAllResources :: Pool a -> IO ()
 destroyAllResources Pool{..} = 
   foldr E.finally (pure ()) (V.map (purgeLocalPool destroy) localPools)
 
-modifyTVar_ :: TVar a -> (a -> a) -> STM ()
-modifyTVar_ v f = readTVar v >>= \a -> writeTVar v $! f a
-
 modError :: String -> String -> a
 modError func msg =
-    error $ "Data.Pool." ++ func ++ ": " ++ msg
+    error $ "Data.Pool.Internal" ++ func ++ ": " ++ msg

@@ -32,6 +32,7 @@ library
     Data.Pool.Internal
     Data.Pool.Internal.Reaper
     Data.Pool.Internal.Pool
+    Data.Pool.Internal.Missing
 
   build-depends:
     base >= 4.4 && < 5,
