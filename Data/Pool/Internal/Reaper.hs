@@ -21,7 +21,6 @@ import qualified Data.Vector as V
 import System.Clock
 
 import Data.Pool.Internal.Pool
-import Data.Pool.Internal.Missing
 
 -- | Runs a thread that kills unused resources. This method has the following
 -- properties:
@@ -53,7 +52,7 @@ reaper destroy idleTime inLock pools = fix $ \next -> do
               let minTime = fmap minimum $ NE.nonEmpty $ map lastUse fresh
               unless (null stale) $ do
                 writeTVar entries fresh
-                modifyTVar_ inUse (subtract (length stale))
+                modifyTVar' inUse (subtract (length stale))
               pure (stale, minTime)
             E.mask_ $ foldr E.finally (pure ()) $
               map (\x -> destroy (entry x) `E.catch` \(_ :: SomeException) -> return ())

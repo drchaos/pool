@@ -4,27 +4,13 @@
 -- theoretically these functions should not be part of
 -- the module.
 module Data.Pool.Internal.Missing
-  ( modifyTVar_
-  , forkIOLabeledWithUnmask
+  ( forkIOLabeledWithUnmask
   ) where
 
 import Control.Concurrent
-import Control.Concurrent.STM
 import Control.Exception
 
 import GHC.Conc.Sync (labelThread)
-
--- | Strict 'TVar' modification.
---
--- >>> x <- newTVar 1
--- >>> atomically $ modifyTVar_ x (\_ -> undefined)
--- *** Exception: Prelude.undefined
--- CallStack (from HasCallStack):
---   error, called at libraries/base/GHC/Err.hs:79:14 in base:GHC.Err
---   undefined, called at <interactive>...
---
-modifyTVar_ :: TVar a -> (a -> a) -> STM ()
-modifyTVar_ v f = readTVar v >>= \a -> writeTVar v $! f a
 
 -- | Sparks off a new thread using 'forkIOWithUnmask' to run the given
 -- IO computation, but first labels the thread with the given label

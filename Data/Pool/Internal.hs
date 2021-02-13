@@ -149,7 +149,7 @@ purgeLocalPool :: (a -> IO ()) -> LocalPool a -> IO ()
 purgeLocalPool destroy LocalPool{..} = do
   resources <- atomically $ do
     idle <- swapTVar entries []
-    modifyTVar_ inUse (subtract (length idle))
+    modifyTVar' inUse (subtract (length idle))
     return (map entry idle)
   mask_ $
     foldr E.finally (pure ()) 
@@ -203,7 +203,7 @@ takeResource pool@Pool{..} = do
         when (used == maxResources) retry
         writeTVar inUse $! used + 1
         return $
-          create `onException` atomically (modifyTVar_ inUse (subtract 1))
+          create `onException` atomically (modifyTVar' inUse (subtract 1))
   return (resource, local)
 {-# INLINABLE takeResource #-}
 
@@ -241,7 +241,7 @@ tryTakeResource pool@Pool{..} = do
           else do
             writeTVar inUse $! used + 1
             return $ Just <$>
-              create `onException` atomically (modifyTVar_ inUse (subtract 1))
+              create `onException` atomically (modifyTVar' inUse (subtract 1))
   return $ (flip (,) local) <$> resource
 {-# INLINABLE tryTakeResource #-}
 
@@ -259,7 +259,7 @@ getLocalPool Pool{..} = do
 destroyResource :: Pool a -> LocalPool a -> a -> IO ()
 destroyResource Pool{..} LocalPool{..} resource = do
    mask_ $ (destroy resource `E.catch` \(_::SomeException) -> return ())
-     `E.finally` atomically (modifyTVar_ inUse (subtract 1))
+     `E.finally` atomically (modifyTVar' inUse (subtract 1))
 {-# INLINABLE destroyResource #-}
 
 -- | Return a resource to the given 'LocalPool'.
@@ -267,7 +267,7 @@ putResource :: Pool a -> LocalPool a -> a -> IO ()
 putResource Pool{..} LocalPool{..} resource = do
     now <- getTime Monotonic
     atomically $ do
-      modifyTVar_ entries (Entry resource now:)
+      modifyTVar' entries (Entry resource now:)
       signal 
 {-# INLINABLE putResource #-}
 
