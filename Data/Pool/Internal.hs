@@ -26,12 +26,14 @@ module Data.Pool.Internal
     , LocalPool(..)
     , Entry(..)
     , createPool
+    , createPoolEx
     , withResource
     , takeResource
     , tryWithResource
     , tryTakeResource
     , destroyResource
     , putResource
+    , putResourceAndSignal
     , destroyAllResources
     , purgeLocalPool
     ) where
@@ -92,7 +94,42 @@ instance Show (Pool a) where
 -- the pool is garbage collected it's recommended to manually
 -- 'destroyAllResources' when you're done with the pool so that the
 -- resources are freed up as soon as possible.
+-- 
+-- _NOTE: Function is kept for compatibility reasons. Use 'createPoolEx`._
 createPool
+    :: (Real t)
+    => IO a
+    -- ^ Action that creates a new resource.
+    -> (a -> IO ())
+    -- ^ Action that destroys an existing resource.
+    -> Int
+    -- ^ The number of stripes (distinct sub-pools) to maintain.
+    -- The smallest acceptable value is 1.
+    -> t
+    -- ^ Amount of time for which an unused resource is kept open.
+    -- The smallest acceptable value is 0.5 seconds.
+    --
+    -- The elapsed time before destroying a resource may be a little
+    -- longer than requested, as the reaper thread wakes at 1-second
+    -- intervals.
+    -> Int
+    -- ^ Maximum number of resources to keep open per stripe.  The
+    -- smallest acceptable value is 1.
+    --
+    -- Requests for resources will block if this limit is reached on a
+    -- single stripe, even if other stripes have idle resources
+    -- available.
+     -> IO (Pool a)
+createPool create destroy numStripes idleTime maxResources =
+  createPoolEx create destroy numStripes (realToFrac idleTime) 0 maxResources
+
+-- | Create a striped resource pool.
+--
+-- Although the garbage collector will destroy all idle resources when
+-- the pool is garbage collected it's recommended to manually
+-- 'destroyAllResources' when you're done with the pool so that the
+-- resources are freed up as soon as possible.
+createPoolEx
     :: IO a
     -- ^ Action that creates a new resource.
     -> (a -> IO ())
@@ -121,7 +158,7 @@ createPool
     -- single stripe, even if other stripes have idle resources
     -- available.
      -> IO (Pool a)
-createPool create destroy numStripes idleTime minResources maxResources = do
+createPoolEx create destroy numStripes idleTime minResources maxResources = do
   when (numStripes < 1) $
     modError "pool " $ "invalid stripe count " ++ show numStripes
   when (idleTime < 0.5) $
@@ -193,7 +230,7 @@ withResource pool act = mask $ \restore -> do
   (resource, local) <- takeResource pool
   ret <- restore (act resource) `onException`
             destroyResource pool local resource
-  putResource pool local resource
+  putResourceAndSignal pool local resource
   return ret
 {-# INLINABLE withResource #-}
 
@@ -223,7 +260,7 @@ tryWithResource pool act = mask $ \restore -> do
     Just (resource, local) -> do
       ret <- restore (Just <$> act resource) `onException`
                 destroyResource pool local resource
-      putResource pool local resource
+      putResourceAndSignal pool local resource
       return ret
     Nothing -> restore $ return (Nothing :: Maybe b)
 {-# INLINABLE tryWithResource #-}
@@ -256,12 +293,23 @@ destroyResource Pool{..} LocalPool{..} resource = do
 {-# INLINABLE destroyResource #-}
 
 -- | Return a resource to the given 'LocalPool'.
-putResource :: Pool a -> LocalPool a -> a -> IO ()
-putResource Pool{..} LocalPool{..} resource = do
+putResourceAndSignal :: Pool a -> LocalPool a -> a -> IO ()
+putResourceAndSignal Pool{..} LocalPool{..} resource = do
     now <- getTime Monotonic
     atomically $ do
       modifyTVar' entries (Entry resource now:)
       signal 
+
+{-# INLINABLE putResourceAndSignal #-}
+
+-- | Return a resource to the given 'LocalPool'.
+--
+-- _NOTE: Function is kept for compatibility reasons. Use putResourceAndSignal`._
+putResource :: LocalPool a -> a -> IO ()
+putResource LocalPool{..} resource = do
+    now <- getTime Monotonic
+    atomically $ do
+      modifyTVar' entries (Entry resource now:)
 {-# INLINABLE putResource #-}
 
 -- | Destroy all resources in all stripes in the pool. Note that this
