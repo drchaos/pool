@@ -170,7 +170,7 @@ createPoolEx create destroy numStripes idleTime minResources maxResources = do
   lock <- newEmptyTMVarIO
   reaperId <- forkIOLabeledWithUnmask "resource-pool: reaper" $ \unmask ->
                 unmask $ reaper destroy
-                  (void . tryAllocateInLocalPool maxResources create)
+                  (void . createInLocalPool maxResources create)
                   (minResources)
                   (round $ 1000000 * idleTime)
                   lock
@@ -189,8 +189,9 @@ createPoolEx create destroy numStripes idleTime minResources maxResources = do
           }
   mkWeakIORef fin (killThread reaperId) >>
     V.mapM_ (\lp -> mkWeakIORef (lfin lp) (purgeLocalPool destroy lp)) localPools
-  V.forM_ localPools $ \lp -> do
-     replicateM minResources $ void $ tryAllocateInLocalPool maxResources create lp
+  when (minResources > 0) $ do
+    V.forM_ localPools $ replicateM minResources . createInLocalPool maxResources create
+    atomically signal
   return p
 
 -- | Destroy all idle resources of the given 'LocalPool' and remove them from

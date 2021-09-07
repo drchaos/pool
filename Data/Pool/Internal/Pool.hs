@@ -5,6 +5,7 @@ module Data.Pool.Internal.Pool
   , Entry(..)
   , allocateInLocalPool
   , tryAllocateInLocalPool
+  , createInLocalPool
   ) where
 
 import Control.Concurrent.STM
@@ -44,6 +45,24 @@ allocateInLocalPool maxResources create LocalPool{..} = join $ atomically $ do
       writeTVar inUse $! used + 1
       return $
         create `onException` atomically (modifyTVar' inUse (subtract 1))
+
+-- | Allocates a resource in the pool, no matter if there
+-- are any free resource or not.
+--
+-- Blocks if max capacity is reached.
+createInLocalPool :: Int -> IO a -> LocalPool a -> IO a
+createInLocalPool maxResources create LocalPool{..} = do
+  join $ atomically $ do
+    used <- readTVar inUse
+    when (used == maxResources) retry
+    writeTVar inUse $! used  + 1
+    return $
+      (create >>= \x -> do
+         tm <- getTime Monotonic
+         atomically $ do
+           es <- readTVar entries
+           writeTVar entries ((Entry x tm):es)
+         pure x) `onException` atomically (modifyTVar' inUse (subtract 1))
 
 -- | Safely allocate a resource in the 'LocalPool'
 -- Returns @Nothing@ if max capacity is reached
