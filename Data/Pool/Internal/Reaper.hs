@@ -60,7 +60,7 @@ reaper destroy restore minResources idleTime inLock pools = fix $ \next -> do
                   old <- readTVar inUse
                   let !new = old - (length stale)
                   writeTVar inUse new
-                  pure (stale, minTime, max 0 (new - minResources))
+                  pure (stale, minTime, max 0 (minResources - new))
             unless (null resources) $ do
               E.mask_ $ foldr E.finally (replicateM_ toRestore $ restore lp) $
                 map (\x -> destroy (entry x) `E.catch` \(_ :: SomeException) -> return ())
