@@ -30,6 +30,8 @@ data LocalPool a = LocalPool {
     -- ^ Idle entries.
     , lfin :: IORef ()
     -- ^ empty value used to attach a finalizer to (internal)
+    , signal :: STM ()
+    -- ^ signal that a new resource was allocated
     } deriving (Typeable)
 
 -- | Safely allocate a resource in the 'LocalPool'.

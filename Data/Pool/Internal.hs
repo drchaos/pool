@@ -33,7 +33,6 @@ module Data.Pool.Internal
     , tryTakeResource
     , destroyResource
     , putResource
-    , putResourceAndSignal
     , destroyAllResources
     , purgeLocalPool
     ) where
@@ -42,7 +41,7 @@ import Control.Concurrent (killThread, myThreadId)
 import Control.Concurrent.STM
 import Control.Exception (SomeException, onException, mask, mask_)
 import qualified Control.Exception as E
-import Control.Monad (liftM3, when, void, replicateM)
+import Control.Monad (liftM4, when, void, replicateM)
 import Data.Hashable (hash)
 import Data.IORef (IORef, newIORef, mkWeakIORef)
 import Data.Typeable (Typeable)
@@ -79,8 +78,6 @@ data Pool a = Pool {
     -- ^ Per-capability resource pools.
     , fin :: IORef ()
     -- ^ empty value used to attach a finalizer to (internal)
-    , signal :: STM ()
-    -- ^ signal that a new resource was allocated
     } deriving (Typeable)
 
 instance Show (Pool a) where
@@ -165,9 +162,10 @@ createPoolEx create destroy numStripes idleTime minResources maxResources = do
     modError "pool " $ "invalid idle time " ++ show idleTime
   when (maxResources < 1) $
     modError "pool " $ "invalid maximum resource count " ++ show maxResources
-  localPools <- V.replicateM numStripes $
-                liftM3 LocalPool (newTVarIO 0) (newTVarIO []) (newIORef ())
   lock <- newEmptyTMVarIO
+  let signal = tryPutTMVar lock () >> pure ()
+  localPools <- V.replicateM numStripes $
+                liftM4 LocalPool (newTVarIO 0) (newTVarIO []) (newIORef ()) (pure signal)
   reaperId <- forkIOLabeledWithUnmask "resource-pool: reaper" $ \unmask ->
                 unmask $ reaper destroy
                   (void . createInLocalPool maxResources create)
@@ -176,7 +174,6 @@ createPoolEx create destroy numStripes idleTime minResources maxResources = do
                   lock
                   localPools
   fin <- newIORef ()
-  let signal = tryPutTMVar lock () >> pure ()
   let p = Pool {
             create
           , destroy
@@ -185,7 +182,6 @@ createPoolEx create destroy numStripes idleTime minResources maxResources = do
           , maxResources
           , localPools
           , fin
-          , signal
           }
   mkWeakIORef fin (killThread reaperId) >>
     V.mapM_ (\lp -> mkWeakIORef (lfin lp) (purgeLocalPool destroy lp)) localPools
@@ -203,9 +199,7 @@ purgeLocalPool destroy LocalPool{..} = do
     modifyTVar' inUse (subtract (length idle))
     return (map entry idle)
   mask_ $
-    foldr E.finally (pure ()) 
-      (map (\resource -> destroy resource `E.catch` \(_::SomeException) -> return ())
-           resources)
+    foldr E.finally (pure ()) (map (\resource -> destroy resource `E.catch` \(_::SomeException) -> return ()) resources)
 
 -- | Temporarily take a resource from a 'Pool', perform an action with
 -- it, and return it to the pool afterwards.
@@ -231,7 +225,7 @@ withResource pool act = mask $ \restore -> do
   (resource, local) <- takeResource pool
   ret <- restore (act resource) `onException`
             destroyResource pool local resource
-  putResourceAndSignal pool local resource
+  putResource local resource
   return ret
 {-# INLINABLE withResource #-}
 
@@ -261,7 +255,7 @@ tryWithResource pool act = mask $ \restore -> do
     Just (resource, local) -> do
       ret <- restore (Just <$> act resource) `onException`
                 destroyResource pool local resource
-      putResourceAndSignal pool local resource
+      putResource local resource
       return ret
     Nothing -> restore $ return (Nothing :: Maybe b)
 {-# INLINABLE tryWithResource #-}
@@ -294,23 +288,12 @@ destroyResource Pool{..} LocalPool{..} resource = do
 {-# INLINABLE destroyResource #-}
 
 -- | Return a resource to the given 'LocalPool'.
-putResourceAndSignal :: Pool a -> LocalPool a -> a -> IO ()
-putResourceAndSignal Pool{..} LocalPool{..} resource = do
-    now <- getTime Monotonic
-    atomically $ do
-      modifyTVar' entries (Entry resource now:)
-      signal 
-
-{-# INLINABLE putResourceAndSignal #-}
-
--- | Return a resource to the given 'LocalPool'.
---
--- _NOTE: Function is kept for compatibility reasons. Use putResourceAndSignal`._
 putResource :: LocalPool a -> a -> IO ()
 putResource LocalPool{..} resource = do
     now <- getTime Monotonic
     atomically $ do
       modifyTVar' entries (Entry resource now:)
+      signal 
 {-# INLINABLE putResource #-}
 
 -- | Destroy all resources in all stripes in the pool. Note that this
