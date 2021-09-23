@@ -9,6 +9,7 @@ module Data.Pool
     , tryTakeResource
     , destroyResource
     , putResource
+    , putResourceAndSignal
     , destroyAllResources
     ) where
 

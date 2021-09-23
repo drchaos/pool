@@ -32,6 +32,7 @@ module Data.Pool.Internal
     , tryTakeResource
     , destroyResource
     , putResource
+    , putResourceAndSignal
     , destroyAllResources
     , purgeLocalPool
     ) where
@@ -93,14 +94,15 @@ instance Show (Pool a) where
 -- 'destroyAllResources' when you're done with the pool so that the
 -- resources are freed up as soon as possible.
 createPool
-    :: IO a
+    :: (Real t)
+    => IO a
     -- ^ Action that creates a new resource.
     -> (a -> IO ())
     -- ^ Action that destroys an existing resource.
     -> Int
     -- ^ The number of stripes (distinct sub-pools) to maintain.
     -- The smallest acceptable value is 1.
-    -> Double
+    -> t
     -- ^ Amount of time for which an unused resource is kept open.
     -- The smallest acceptable value is 0.5 seconds.
     --
@@ -115,7 +117,7 @@ createPool
     -- single stripe, even if other stripes have idle resources
     -- available.
      -> IO (Pool a)
-createPool create destroy numStripes idleTime maxResources = do
+createPool create destroy numStripes idleTime' maxResources = do
   when (numStripes < 1) $
     modError "pool " $ "invalid stripe count " ++ show numStripes
   when (idleTime < 0.5) $
@@ -142,6 +144,7 @@ createPool create destroy numStripes idleTime maxResources = do
   mkWeakIORef fin (killThread reaperId) >>
     V.mapM_ (\lp -> mkWeakIORef (lfin lp) (purgeLocalPool destroy lp)) localPools
   return p
+  where idleTime = realToFrac idleTime'
 
 -- | Destroy all idle resources of the given 'LocalPool' and remove them from
 -- the pool.
@@ -180,7 +183,7 @@ withResource pool act = mask $ \restore -> do
   (resource, local) <- takeResource pool
   ret <- restore (act resource) `onException`
             destroyResource pool local resource
-  putResource pool local resource
+  putResourceAndSignal pool local resource
   return ret
 {-# INLINABLE withResource #-}
 
@@ -219,7 +222,7 @@ tryWithResource pool act = mask $ \restore -> do
     Just (resource, local) -> do
       ret <- restore (Just <$> act resource) `onException`
                 destroyResource pool local resource
-      putResource pool local resource
+      putResourceAndSignal pool local resource
       return ret
     Nothing -> restore $ return (Nothing :: Maybe b)
 {-# INLINABLE tryWithResource #-}
@@ -263,12 +266,23 @@ destroyResource Pool{..} LocalPool{..} resource = do
 {-# INLINABLE destroyResource #-}
 
 -- | Return a resource to the given 'LocalPool'.
-putResource :: Pool a -> LocalPool a -> a -> IO ()
-putResource Pool{..} LocalPool{..} resource = do
+putResourceAndSignal :: Pool a -> LocalPool a -> a -> IO ()
+putResourceAndSignal Pool{..} LocalPool{..} resource = do
     now <- getTime Monotonic
     atomically $ do
       modifyTVar' entries (Entry resource now:)
-      signal 
+      signal
+ 
+{-# INLINABLE putResourceAndSignal #-}
+
+-- | Return a resource to the given 'LocalPool'.
+--
+-- _NOTE: Function is kept for compatibility reasons. Use putResourceAndSignal`._
+putResource :: LocalPool a -> a -> IO ()
+putResource LocalPool{..} resource = do
+    now <- getTime Monotonic
+    atomically $ do
+      modifyTVar' entries (Entry resource now:) 
 {-# INLINABLE putResource #-}
 
 -- | Destroy all resources in all stripes in the pool. Note that this
